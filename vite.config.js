@@ -6,7 +6,7 @@ import { dirname, resolve } from 'node:path'
 const projectRoot = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
-  base: '/neon-guess-game-public/',
+  base: process.env.VITE_BASE || '/neon-guess-game-public/',
   root: projectRoot,
   plugins: [
     react({
