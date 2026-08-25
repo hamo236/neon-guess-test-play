@@ -317,6 +317,7 @@ export function GameStateProvider({ children }) {
     session: null,
     message: '',
   });
+  const [joinDiagnostic, setJoinDiagnostic] = useState(null);
   const unsubscribeRoomRef = useRef(null);
   const unsubscribeTargetRef = useRef(null);
   const unsubscribeDisplayTargetRef = useRef(null);
@@ -624,18 +625,36 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
       return code;
     }, [fbStatus, subscribeToFirebaseRoom]),
 
-    joinRoom: useCallback(async ({ code, name }) => {
+    joinRoom: useCallback(async ({ code, name, onDiagnostic }) => {
+      setJoinDiagnostic(null);
+      const report = (diagnostic) => {
+        setJoinDiagnostic(diagnostic);
+        onDiagnostic?.(diagnostic);
+      };
+      report({ stage: 'auth-ready', status: 'passed', code: 'ok', message: 'Firebase Auth session is ready.' });
       if (!isFirebaseConfigured || fbStatus !== 'ready') {
-        throw new Error('Firebase not configured. Use local mode.');
+        const error = new Error('Firebase not configured. Use local mode.');
+        error.code = 'firebase/not-ready';
+        report({ stage: 'auth-ready', status: 'failed', code: error.code, message: error.message });
+        throw error;
       }
       const uid = getCurrentUserId();
-      if (!uid) throw new Error('Not authenticated');
+      if (!uid) {
+        const error = new Error('Not authenticated');
+        error.code = 'auth/not-authenticated';
+        report({ stage: 'auth-ready', status: 'failed', code: error.code, message: error.message });
+        throw error;
+      }
 
       const normalizedCode = normalizeRoomCode(code);
       const trimmedName = String(name || '').trim();
       if (!trimmedName) throw new Error('Enter your name before joining a room.');
       const player = createPlayer({ id: uid, name: trimmedName, isHost: false });
-      const { room, isReconnect } = await reconnectOrJoinFirebaseRoom({ code: normalizedCode, player });
+      const { room, isReconnect } = await reconnectOrJoinFirebaseRoom({
+        code: normalizedCode,
+        player,
+        onDiagnostic: report,
+      });
 
       dispatch({ type: A.SET_MY_PLAYER_ID, payload: uid });
 
@@ -962,6 +981,7 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
     fbError,
     isFirebaseConfigured,
     recovery,
+    joinDiagnostic,
     GAME_PHASES,
     GAME_MODES,
     CATEGORIES,

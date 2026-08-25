@@ -5,6 +5,7 @@
 
 import { getRoomRef, set, get, update, onDisconnect, runTransaction } from './database.js';
 import { normalizeRoomCode } from '../game/roomManager.js';
+import { addJoinDiagnosticError, createJoinDiagnostic } from './joinDiagnostics.js';
 
 export const MAX_PLAYERS = 4;
 export const MIN_PLAYERS = 2;
@@ -31,23 +32,30 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readRoomWithRetry(roomRef, { expectedPlayerId } = {}) {
+async function readRoomWithRetry(roomRef, { expectedPlayerId, onDiagnostic, stage = 'room-read' } = {}) {
   let lastError;
   for (let attempt = 0; attempt < ROOM_READ_RETRIES; attempt += 1) {
+    const attemptNumber = attempt + 1;
+    onDiagnostic?.(createJoinDiagnostic({ stage, status: 'attempt', attempt: attemptNumber, detail: `Attempt ${attemptNumber} started.` }));
     try {
       const snapshot = await get(roomRef);
       if (snapshot.exists()) {
         const room = snapshot.val();
-        if (!expectedPlayerId || room?.players?.[expectedPlayerId]) return { snapshot, room };
+        if (!expectedPlayerId || room?.players?.[expectedPlayerId]) {
+          onDiagnostic?.(createJoinDiagnostic({ stage, status: 'passed', attempt: attemptNumber, detail: `Attempt ${attemptNumber} succeeded.` }));
+          return { snapshot, room };
+        }
       }
       if (attempt < ROOM_READ_RETRIES - 1) await wait(ROOM_READ_BACKOFF_MS * (attempt + 1));
     } catch (error) {
       lastError = error;
+      onDiagnostic?.(createJoinDiagnostic({ stage, error, attempt: attemptNumber }));
       if (!isRetryableFirebaseError(error) || attempt >= ROOM_READ_RETRIES - 1) throw error;
       await wait(ROOM_READ_BACKOFF_MS * (attempt + 1));
     }
   }
   if (lastError) throw lastError;
+  onDiagnostic?.(createJoinDiagnostic({ stage, status: 'failed', error: roomNotFoundError('unknown') }));
   return { snapshot: null, room: null };
 }
 
@@ -125,28 +133,36 @@ export async function createFirebaseRoom({ code, hostPlayer, mode, category }) {
  * Existing players may rejoin in ANY phase without resetting room state.
  * @returns {{ room: object, isReconnect: boolean }}
  */
-export async function reconnectOrJoinFirebaseRoom({ code, player }) {
+export async function reconnectOrJoinFirebaseRoom({ code, player, onDiagnostic }) {
   const normalizedCode = normalizeRoomCode(code);
   const roomRef = getRoomRef(normalizedCode);
-  if (!roomRef) throw new Error('Firebase not configured');
+  onDiagnostic?.(createJoinDiagnostic({ stage: 'input-normalization', status: 'passed', detail: 'Room code normalized.' }));
+  if (!roomRef) {
+    const error = new Error('Firebase not configured.');
+    error.code = 'firebase/not-configured';
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'firebase-config', error }));
+  }
 
   let snapshot;
   let initialRoom;
   try {
-    const readResult = await readRoomWithRetry(roomRef);
+    const readResult = await readRoomWithRetry(roomRef, { onDiagnostic, stage: 'room-read' });
     snapshot = readResult.snapshot;
     initialRoom = readResult.room;
   } catch (error) {
     if (isRetryableFirebaseError(error)) {
       const diagnosticError = new Error('We could not reach the room server. Check your connection and try again.');
-      diagnosticError.code = 'room/network-unreachable';
-      throw diagnosticError;
+      diagnosticError.code = error?.code || 'room/network-unreachable';
+      throw addJoinDiagnosticError(diagnosticError, createJoinDiagnostic({ stage: 'room-read', error }));
     }
     throw error;
   }
   if (!snapshot?.exists() || !initialRoom) {
-    throw new Error('Room not found. Check the code and try again.');
+    const error = new Error('Room not found. Check the code and try again.');
+    error.code = 'room/not-found';
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'room-read', error }));
   }
+  onDiagnostic?.(createJoinDiagnostic({ stage: 'room-read', status: 'passed', detail: 'Room exists on the server.' }));
 
   const initialPlayers = initialRoom.players || {};
   if (initialRoom.removedPlayers?.[player.id]) {
@@ -168,7 +184,10 @@ export async function reconnectOrJoinFirebaseRoom({ code, player }) {
     score: 0,
   };
 
-  const result = await runTransaction(roomRef, (current) => {
+  onDiagnostic?.(createJoinDiagnostic({ stage: 'join-transaction', status: 'attempt', detail: 'Join transaction started.' }));
+  let result;
+  try {
+    result = await runTransaction(roomRef, (current) => {
     if (!current) return current;
     const players = current.players || {};
 
@@ -204,10 +223,15 @@ export async function reconnectOrJoinFirebaseRoom({ code, player }) {
         },
       },
       scores: { ...(current.scores || {}), [player.id]: 0 },
-    };
-  });
+    }
+    });
+  } catch (error) {
+    onDiagnostic?.(createJoinDiagnostic({ stage: 'join-transaction', error }));
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'join-transaction', error }));
+  }
 
   const finalRoom = result.snapshot.val();
+  onDiagnostic?.(createJoinDiagnostic({ stage: 'join-transaction', status: 'passed', detail: 'Firebase acknowledged the join transaction.' }));
   if (!result.committed || !finalRoom?.players?.[player.id]) {
     const latestPhase = finalRoom?.phase ?? initialRoom.phase;
     const latestCount = Object.keys(finalRoom?.players || {}).length;
@@ -221,6 +245,7 @@ export async function reconnectOrJoinFirebaseRoom({ code, player }) {
     throw new Error('Unable to join room safely. Please retry.');
   }
 
+  onDiagnostic?.(createJoinDiagnostic({ stage: 'post-join-verify', status: 'passed', detail: 'The player is present in authoritative room state.' }));
   setupPresence(normalizedCode, player.id);
   return {
     room: finalRoom,

@@ -12,7 +12,7 @@ const MOCK_NAMES = ['NeonNinja99', 'CyberViper', 'GhostByte', 'ZeroKelvin'];
 const LobbyPage = () => {
   const {
     state, actions, GAME_PHASES, GAME_MODES, CATEGORIES,
-    fbStatus, fbError, isFirebaseConfigured, isHost, myPlayerId, recovery,
+    fbStatus, fbError, isFirebaseConfigured, isHost, myPlayerId, recovery, joinDiagnostic,
   } = useGameContext();
   const location = useLocation();
   const navigate = useNavigate();
@@ -30,6 +30,7 @@ const LobbyPage = () => {
   const [lobbyMode, setLobbyMode] = useState('create'); // 'create' | 'join'
   const [inviteStatus, setInviteStatus] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [diagnosticCopyStatus, setDiagnosticCopyStatus] = useState('');
 
   const { phase, players, roomCode, mode: stateMode, category } = state;
   const requestedLobbyMode = new URLSearchParams(location.search).get('mode');
@@ -143,6 +144,36 @@ const LobbyPage = () => {
       setCopyStatus('Code copied.');
     } catch (copyError) {
       setCopyStatus('Copy failed.');
+    }
+  };
+
+  const handleCopyJoinDiagnostic = async () => {
+    if (!joinDiagnostic) return;
+    const report = [
+      `NEON GUESS Join diagnostic`,
+      `Stage: ${joinDiagnostic.stage}`,
+      `Status: ${joinDiagnostic.status}`,
+      `Code: ${joinDiagnostic.code}`,
+      `Message: ${joinDiagnostic.message}`,
+      joinDiagnostic.attempt ? `Attempt: ${joinDiagnostic.attempt}` : '',
+      `Time: ${joinDiagnostic.recordedAt}`,
+    ].filter(Boolean).join('\n');
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(report);
+      else {
+        const textarea = document.createElement('textarea');
+        textarea.value = report;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setDiagnosticCopyStatus('Diagnostic copied.');
+    } catch {
+      setDiagnosticCopyStatus('Copy failed. Take a screenshot of this panel.');
     }
   };
 
@@ -670,6 +701,33 @@ const LobbyPage = () => {
               </>
             )}
           </section>}
+
+          {joinDiagnostic && joinDiagnostic.status === 'failed' && (
+            <div
+              role="status"
+              className="ng-join-diagnostic-frame mb-3 rounded-xl border border-amber-300/30 bg-amber-300/5 px-4 py-3 text-amber-100 shadow-[0_0_24px_rgba(251,191,36,0.08)]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-label-caps text-label-caps text-amber-200">Join diagnostic</p>
+                  <p className="mt-1 font-body-sm text-body-sm">The first failed step was recorded. Send this code to the game owner.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyJoinDiagnostic}
+                  className="shrink-0 rounded-lg border border-amber-200/30 px-3 py-2 font-label-caps text-label-caps text-amber-100 hover:bg-amber-200/10"
+                >
+                  Copy report
+                </button>
+              </div>
+              <dl className="mt-3 grid grid-cols-1 gap-1 font-mono text-xs sm:grid-cols-2">
+                <div><dt className="inline text-amber-200/70">Stage: </dt><dd className="inline break-all">{joinDiagnostic.stage}</dd></div>
+                <div><dt className="inline text-amber-200/70">Code: </dt><dd className="inline break-all font-bold">{joinDiagnostic.code}</dd></div>
+                <div className="sm:col-span-2"><dt className="inline text-amber-200/70">Message: </dt><dd className="inline break-words">{joinDiagnostic.message}</dd></div>
+              </dl>
+              {diagnosticCopyStatus && <p className="mt-2 text-xs text-amber-200" role="status">{diagnosticCopyStatus}</p>}
+            </div>
+          )}
 
           {error && (
             <div
