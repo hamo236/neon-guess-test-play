@@ -55,7 +55,6 @@ async function readRoomWithRetry(roomRef, { expectedPlayerId, onDiagnostic, stag
     }
   }
   if (lastError) throw lastError;
-  onDiagnostic?.(createJoinDiagnostic({ stage, status: 'failed', error: roomNotFoundError('unknown') }));
   return { snapshot: null, room: null };
 }
 
@@ -123,7 +122,8 @@ export async function createFirebaseRoom({ code, hostPlayer, mode, category }) {
   // committed room can be read back from Firebase before the UI shares it.
   const confirmed = await readRoomWithRetry(roomRef, { expectedPlayerId: hostPlayer.id });
   if (!confirmed.room?.players?.[hostPlayer.id] || confirmed.room.hostId !== hostPlayer.id) {
-    throw roomNotFoundError(normalizedCode);
+    const error = roomNotFoundError(normalizedCode);
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'room-write-verify', error }));
   }
   return confirmed.room;
 }
@@ -158,8 +158,9 @@ export async function reconnectOrJoinFirebaseRoom({ code, player, onDiagnostic }
     throw error;
   }
   if (!snapshot?.exists() || !initialRoom) {
-    const error = new Error('Room not found. Check the code and try again.');
+    const error = new Error(`Room ${normalizedCode} was not found on the server. Check the code and try again.`);
     error.code = 'room/not-found';
+    onDiagnostic?.(createJoinDiagnostic({ stage: 'room-read', error }));
     throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'room-read', error }));
   }
   onDiagnostic?.(createJoinDiagnostic({ stage: 'room-read', status: 'passed', detail: 'Room exists on the server.' }));
