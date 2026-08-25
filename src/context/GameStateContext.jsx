@@ -312,6 +312,7 @@ export function GameStateProvider({ children }) {
     isFirebaseConfigured ? 'initializing' : 'local'
   );
   const [fbError, setFbError] = useState(null);
+  const [fbErrorCode, setFbErrorCode] = useState(null);
   const [recovery, setRecovery] = useState({
     status: 'idle',
     session: null,
@@ -346,7 +347,8 @@ export function GameStateProvider({ children }) {
       })
       .catch((err) => {
         console.error('[Firebase] Auth init failed:', err);
-        setFbError('Firebase authentication failed. Running in local mode.');
+setFbError('Firebase authentication failed. Running in local mode.');
+        setFbErrorCode(err?.code || 'auth/initialization-failed');
         setFbStatus('error');
       });
   }, []);
@@ -633,8 +635,8 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
       };
       report({ stage: 'auth-ready', status: 'passed', code: 'ok', message: 'Firebase Auth session is ready.' });
       if (!isFirebaseConfigured || fbStatus !== 'ready') {
-        const error = new Error('Firebase not configured. Use local mode.');
-        error.code = 'firebase/not-ready';
+        const error = new Error(fbError || 'Firebase is not ready. Please retry the connection.');
+        error.code = fbErrorCode || 'firebase/not-ready';
         report({ stage: 'auth-ready', status: 'failed', code: error.code, message: error.message });
         throw error;
       }
@@ -961,6 +963,7 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
     canStart: useCallback(() => canStartGame(state.players), [state.players]),
     retrySessionRecovery: retryAutoRejoin,
     clearSessionRecovery,
+    clearJoinDiagnostic: useCallback(() => setJoinDiagnostic(null), []),
   };
 
   // Derived values
@@ -979,6 +982,7 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
     latestUnansweredQuestion,
     fbStatus,
     fbError,
+    fbErrorCode,
     isFirebaseConfigured,
     recovery,
     joinDiagnostic,

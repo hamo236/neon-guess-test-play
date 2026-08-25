@@ -179,6 +179,8 @@ const LobbyPage = () => {
 
   const handleJoinRoom = async () => {
     if (isCreating || isJoining) return;
+    actions.clearJoinDiagnostic?.();
+    setDiagnosticCopyStatus('');
     if (!/^\d{3}$/.test(joinCode.trim())) { setError('Enter the 3-digit room code.'); return; }
     if (!joinName.trim()) { setError('Enter your name.'); return; }
     setError('');
