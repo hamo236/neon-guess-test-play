@@ -13,6 +13,50 @@ function normalizedCodeForMatch(code) {
   return normalizeRoomCode(code);
 }
 
+const ROOM_READ_RETRIES = 3;
+const ROOM_READ_BACKOFF_MS = 350;
+
+function isRetryableFirebaseError(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const message = String(error?.message || '').toLowerCase();
+  return code.includes('network')
+    || code.includes('unavailable')
+    || code.includes('disconnected')
+    || message.includes('network')
+    || message.includes('disconnected')
+    || message.includes('timeout');
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readRoomWithRetry(roomRef, { expectedPlayerId } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < ROOM_READ_RETRIES; attempt += 1) {
+    try {
+      const snapshot = await get(roomRef);
+      if (snapshot.exists()) {
+        const room = snapshot.val();
+        if (!expectedPlayerId || room?.players?.[expectedPlayerId]) return { snapshot, room };
+      }
+      if (attempt < ROOM_READ_RETRIES - 1) await wait(ROOM_READ_BACKOFF_MS * (attempt + 1));
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableFirebaseError(error) || attempt >= ROOM_READ_RETRIES - 1) throw error;
+      await wait(ROOM_READ_BACKOFF_MS * (attempt + 1));
+    }
+  }
+  if (lastError) throw lastError;
+  return { snapshot: null, room: null };
+}
+
+function roomNotFoundError(code) {
+  const error = new Error(`Room ${code} was not confirmed on the server. The connection may have dropped before saving. Please retry.`);
+  error.code = 'room/not-confirmed';
+  return error;
+}
+
 /**
  * Creates a new room in Firebase RTDB.
  * @param {object} params
@@ -66,7 +110,14 @@ export async function createFirebaseRoom({ code, hostPlayer, mode, category }) {
   if (!result.committed) {
     throw new Error('Room code already exists. Please try again.');
   }
-  return result.snapshot.val() ?? roomData;
+
+  // Do not treat a locally generated code as a ready room. Confirm the
+  // committed room can be read back from Firebase before the UI shares it.
+  const confirmed = await readRoomWithRetry(roomRef, { expectedPlayerId: hostPlayer.id });
+  if (!confirmed.room?.players?.[hostPlayer.id] || confirmed.room.hostId !== hostPlayer.id) {
+    throw roomNotFoundError(normalizedCode);
+  }
+  return confirmed.room;
 }
 
 /**
@@ -79,12 +130,24 @@ export async function reconnectOrJoinFirebaseRoom({ code, player }) {
   const roomRef = getRoomRef(normalizedCode);
   if (!roomRef) throw new Error('Firebase not configured');
 
-  const snapshot = await get(roomRef);
-  if (!snapshot.exists()) {
-    throw new Error('Room not found. Check the code.');
+  let snapshot;
+  let initialRoom;
+  try {
+    const readResult = await readRoomWithRetry(roomRef);
+    snapshot = readResult.snapshot;
+    initialRoom = readResult.room;
+  } catch (error) {
+    if (isRetryableFirebaseError(error)) {
+      const diagnosticError = new Error('We could not reach the room server. Check your connection and try again.');
+      diagnosticError.code = 'room/network-unreachable';
+      throw diagnosticError;
+    }
+    throw error;
+  }
+  if (!snapshot?.exists() || !initialRoom) {
+    throw new Error('Room not found. Check the code and try again.');
   }
 
-  const initialRoom = snapshot.val();
   const initialPlayers = initialRoom.players || {};
   if (initialRoom.removedPlayers?.[player.id]) {
     throw new Error('You were removed from this room.');
