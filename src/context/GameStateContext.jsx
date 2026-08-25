@@ -59,6 +59,7 @@ import {
   removeFirebasePlayer,
 } from '../firebase/roomService.js';
 import { saveSession, loadSession, clearSession } from '../utils/sessionStorage.js';
+import { createJoinTrace, getSafeClientNetworkSnapshot } from '../firebase/joinDiagnostics.js';
 
 function classifyRecoveryFailure(error) {
   const message = error?.message || 'We could not restore the active match.';
@@ -629,9 +630,16 @@ const attachToRoom = useCallback((roomCode, playerId, roomPhase, roundId = null)
 
     joinRoom: useCallback(async ({ code, name, onDiagnostic }) => {
       setJoinDiagnostic(null);
+      const trace = createJoinTrace();
       const report = (diagnostic) => {
-        setJoinDiagnostic(diagnostic);
-        onDiagnostic?.(diagnostic);
+        const enrichedDiagnostic = {
+          ...diagnostic,
+          correlationId: trace.correlationId,
+          elapsedMs: Math.max(0, Date.now() - trace.startedAt),
+          connection: getSafeClientNetworkSnapshot(),
+        };
+        setJoinDiagnostic(enrichedDiagnostic);
+        onDiagnostic?.(enrichedDiagnostic);
       };
       report({ stage: 'auth-ready', status: 'passed', code: 'ok', message: 'Firebase Auth session is ready.' });
       if (!isFirebaseConfigured || fbStatus !== 'ready') {

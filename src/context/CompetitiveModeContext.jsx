@@ -9,6 +9,7 @@ import { createTournamentState, finishMatch, recordMatchGuess, completeTournamen
 import { assignTeamTargets, createTeamBattleState, finishTeamRound, advanceTeamRound, confirmTeamRound, areAllRequiredTeamConfirmationsComplete, getRequiredConfirmationTeams, validateTeamAssignments, TEAM_IDS } from '../modes/teamBattleEngine.js';
 import { targetMapForTeams } from '../modes/teamBattleTargetPlan.js';
 import { generateRoomCode, normalizeRoomCode } from '../game/roomManager.js';
+import { createJoinTrace, getSafeClientNetworkSnapshot } from '../firebase/joinDiagnostics.js';
 
 const CompetitiveModeContext = createContext(null);
 const sessionKey = (mode) => `neon_guess_${mode}_session`;
@@ -224,7 +225,36 @@ export function CompetitiveModeProvider({ mode, children }) {
     if (!roomId && recovery.status === 'pending' && session?.resumeAfterRefresh === true && !recoveryAttemptedRef.current) retrySessionRecovery();
   }, [roomId, recovery.status, retrySessionRecovery]);
   const createRoom = useCallback(async (category) => { if (!playerId) throw new Error('Authenticating player identity. Please try again in a moment.'); const trimmedName = playerName.trim(); if (!trimmedName) throw new Error('Enter your name before creating a room.'); setError(''); const player = createModePlayer({ id: playerId, name: trimmedName, isHost: true }); const id = makeRoomId(mode); await createCompetitiveRoom({ mode, roomId: id, player, category }); saveSession(mode, { roomId: id, playerId, playerName: trimmedName, resumeAfterRefresh: false }); setRecovery({ status: 'idle', roomId: '', message: '' }); setRoomId(id); }, [mode, playerId, playerName]);
-    const joinRoom = useCallback(async (requestedId) => { if (!playerId) throw new Error('Authenticating player identity. Please try again in a moment.'); const trimmedName = playerName.trim(); if (!trimmedName) throw new Error('Enter your name before joining a room.'); setError(''); setJoinDiagnostic(null); const normalized = normalizeRoomCode(requestedId); const player = createModePlayer({ id: playerId, name: trimmedName }); try { await joinCompetitiveRoom({ mode, roomId: normalized, player }); } catch (joinError) { if (joinError?.joinDiagnostic) setJoinDiagnostic(joinError.joinDiagnostic); throw joinError; } saveSession(mode, { roomId:
+    const joinRoom = useCallback(async (requestedId) => {
+    const trace = createJoinTrace();
+    setError('');
+    setJoinDiagnostic(null);
+    const reportLocalFailure = (code, message) => {
+      const diagnostic = { stage: 'input-validation', status: 'failed', code, message, correlationId: trace.correlationId, elapsedMs: Math.max(0, Date.now() - trace.startedAt), connection: getSafeClientNetworkSnapshot(), recordedAt: new Date().toISOString() };
+      setJoinDiagnostic(diagnostic);
+      return diagnostic;
+    };
+    if (!playerId) {
+      const error = new Error('Authenticating player identity. Please try again in a moment.');
+      error.code = 'auth/not-authenticated';
+      reportLocalFailure(error.code, error.message);
+      throw error;
+    }
+    const trimmedName = playerName.trim();
+    if (!trimmedName) {
+      const error = new Error('Enter your name before joining a room.');
+      error.code = 'input/name-required';
+      reportLocalFailure(error.code, error.message);
+      throw error;
+    }
+    const normalized = normalizeRoomCode(requestedId);
+    if (!/^\d{3}$/.test(normalized)) {
+      const error = new Error('Enter a valid 3-digit room code.');
+      error.code = 'input/invalid-room-code';
+      reportLocalFailure(error.code, error.message);
+      throw error;
+    }
+    const player = createModePlayer({ id: playerId, name: trimmedName }); try { await joinCompetitiveRoom({ mode, roomId: normalized, player }); } catch (joinError) { if (joinError?.joinDiagnostic) setJoinDiagnostic({ ...joinError.joinDiagnostic, correlationId: trace.correlationId, elapsedMs: Math.max(0, Date.now() - trace.startedAt), connection: getSafeClientNetworkSnapshot() }); throw joinError; } saveSession(mode, { roomId:
  normalized, playerId, playerName: trimmedName, resumeAfterRefresh: false }); setRecovery({ status: 'idle', roomId: '', message: '' }); setRoomId(normalized); }, [mode, playerId, playerName]);
   const clearJoinDiagnostic = useCallback(() => setJoinDiagnostic(null), []);
 

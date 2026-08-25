@@ -33,6 +33,28 @@ function policyJoinError(stage, code, message) {
   return competitiveJoinError(error, stage, code);
 }
 
+const COMPETITIVE_JOIN_READ_ATTEMPTS = 3;
+const COMPETITIVE_JOIN_RETRY_DELAYS_MS = [250, 600];
+
+function waitForCompetitiveJoinRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function readCompetitiveRoomWithRetry(target) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= COMPETITIVE_JOIN_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await get(target);
+    } catch (error) {
+      lastError = error;
+      if (attempt < COMPETITIVE_JOIN_READ_ATTEMPTS) {
+        await waitForCompetitiveJoinRetry(COMPETITIVE_JOIN_RETRY_DELAYS_MS[attempt - 1] || 600);
+      }
+    }
+  }
+  throw lastError || new Error('Competitive room read failed.');
+}
+
 export function getCompetitiveNamespace(mode) {
   return ROOTS[mode];
 }
@@ -83,7 +105,7 @@ export async function joinCompetitiveRoom({ mode, roomId, player }) {
 
   let initialSnapshot;
   try {
-    initialSnapshot = await get(target);
+    initialSnapshot = await readCompetitiveRoomWithRetry(target);
   } catch (error) {
     throw competitiveJoinError(error, 'room-read', error?.code || 'room/network-unreachable');
   }

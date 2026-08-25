@@ -156,7 +156,11 @@ const LobbyPage = () => {
       `Code: ${joinDiagnostic.code}`,
       `Message: ${joinDiagnostic.message}`,
       joinDiagnostic.attempt ? `Attempt: ${joinDiagnostic.attempt}` : '',
-      `Time: ${joinDiagnostic.recordedAt}`,
+      `Correlation: ${joinDiagnostic.correlationId || 'unavailable'}`,
+      `Elapsed: ${Number.isFinite(joinDiagnostic.elapsedMs) ? `${joinDiagnostic.elapsedMs}ms` : 'unavailable'}`,
+      `Browser online: ${joinDiagnostic.connection?.browserOnline == null ? 'unknown' : joinDiagnostic.connection.browserOnline}`,
+      `Network: ${joinDiagnostic.connection?.effectiveType || joinDiagnostic.connection?.connectionType || 'unknown'}`,
+      `Time: ${joinDiagnostic.recordedAt || 'unavailable'}`,
     ].filter(Boolean).join('\n');
     try {
       if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(report);
@@ -725,6 +729,10 @@ const LobbyPage = () => {
               <dl className="mt-3 grid grid-cols-1 gap-1 font-mono text-xs sm:grid-cols-2">
                 <div><dt className="inline text-amber-200/70">Stage: </dt><dd className="inline break-all">{joinDiagnostic.stage}</dd></div>
                 <div><dt className="inline text-amber-200/70">Code: </dt><dd className="inline break-all font-bold">{joinDiagnostic.code}</dd></div>
+                <div><dt className="inline text-amber-200/70">Correlation: </dt><dd className="inline break-all">{joinDiagnostic.correlationId || 'unavailable'}</dd></div>
+                <div><dt className="inline text-amber-200/70">Elapsed: </dt><dd className="inline">{Number.isFinite(joinDiagnostic.elapsedMs) ? `${joinDiagnostic.elapsedMs}ms` : 'unavailable'}</dd></div>
+                <div><dt className="inline text-amber-200/70">Browser online: </dt><dd className="inline">{joinDiagnostic.connection?.browserOnline == null ? 'unknown' : String(joinDiagnostic.connection.browserOnline)}</dd></div>
+                <div><dt className="inline text-amber-200/70">Network: </dt><dd className="inline">{joinDiagnostic.connection?.effectiveType || joinDiagnostic.connection?.connectionType || 'unknown'}</dd></div>
                 <div className="sm:col-span-2"><dt className="inline text-amber-200/70">Message: </dt><dd className="inline break-words">{joinDiagnostic.message}</dd></div>
               </dl>
               {diagnosticCopyStatus && <p className="mt-2 text-xs text-amber-200" role="status">{diagnosticCopyStatus}</p>}
