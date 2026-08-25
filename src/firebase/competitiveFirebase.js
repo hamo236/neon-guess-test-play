@@ -2,6 +2,7 @@ import { child, get, onDisconnect, onValue, ref, remove, runTransaction, set, up
 import { db } from './config.js';
 import { clone } from '../modes/modeTypes.js';
 import { normalizeRoomCode } from '../game/roomManager.js';
+import { createJoinDiagnostic, addJoinDiagnosticError } from './joinDiagnostics.js';
 
 const ROOTS = { tournament: 'tournamentRooms', team_battle: 'teamRooms' };
 const PRIVATE_ROOTS = { tournament: 'tournamentPrivateTargets', team_battle: 'teamBattlePrivateTargets' };
@@ -17,6 +18,19 @@ function privateTargetRef(mode, roomId, matchId, playerId) {
   if (!db) return null;
   if (mode === 'team_battle') return ref(db, `${PRIVATE_ROOTS.team_battle}/${roomId}/${playerId}/${matchId}/target`);
   return ref(db, `${PRIVATE_ROOTS.tournament}/${roomId}/${playerId}/${matchId}/target`);
+}
+
+function competitiveJoinError(error, stage, fallbackCode = 'room/join-failed') {
+  const enriched = error instanceof Error ? error : new Error(String(error || 'Competitive room join failed.'));
+  if (!enriched.code) enriched.code = fallbackCode;
+  if (!enriched.joinDiagnostic) enriched.joinDiagnostic = createJoinDiagnostic({ stage, error: enriched });
+  return addJoinDiagnosticError(enriched, enriched.joinDiagnostic);
+}
+
+function policyJoinError(stage, code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return competitiveJoinError(error, stage, code);
 }
 
 export function getCompetitiveNamespace(mode) {
@@ -65,49 +79,57 @@ export async function createCompetitiveRoom({ mode, roomId, player, category }) 
 export async function joinCompetitiveRoom({ mode, roomId, player }) {
   const normalizedRoomId = normalizeRoomCode(roomId);
   const target = roomRef(mode, normalizedRoomId);
-  if (!target) throw new Error('Firebase not configured');
+  if (!target) throw policyJoinError('firebase-config', 'firebase/not-configured', 'Firebase is not configured for this mode.');
 
-  const initialSnapshot = await get(target);
-  if (!initialSnapshot.exists()) throw new Error('Room not found. Check the code and try again.');
+  let initialSnapshot;
+  try {
+    initialSnapshot = await get(target);
+  } catch (error) {
+    throw competitiveJoinError(error, 'room-read', error?.code || 'room/network-unreachable');
+  }
+  if (!initialSnapshot.exists()) throw policyJoinError('room-read', 'room/not-found', `Room ${normalizedRoomId} was not found on the server. Check the code and try again.`);
   const initialRoom = initialSnapshot.val();
-  if (initialRoom.removedPlayers?.[player.id]) throw new Error('You were removed from this room.');
+  if (initialRoom.removedPlayers?.[player.id]) throw policyJoinError('room-policy', 'room/player-removed', 'You were removed from this room.');
 
   const existingPlayer = initialRoom.players?.[player.id];
   const isReconnect = Boolean(existingPlayer);
-  if (!isReconnect && (initialRoom.status !== 'lobby' || initialRoom.phase !== 'lobby')) {
-    throw new Error('This room has already started. Only returning players can reconnect.');
-  }
-  if (!isReconnect && Object.keys(initialRoom.players || {}).length >= 4) {
-    throw new Error('Room is full. Ask the host to create a new room.');
-  }
+  if (!isReconnect && (initialRoom.status !== 'lobby' || initialRoom.phase !== 'lobby')) throw policyJoinError('room-policy', 'room/game-in-progress', 'This room has already started. Only returning players can reconnect.');
+  if (!isReconnect && Object.keys(initialRoom.players || {}).length >= 4) throw policyJoinError('room-policy', 'room/full', 'Room is full. Ask the host to create a new room.');
 
   if (isReconnect) {
-    await update(child(target, `players/${player.id}`), { connected: true });
-    const reconnectedSnapshot = await get(target);
-    setupPresence(mode, normalizedRoomId, player.id);
-    return { room: reconnectedSnapshot.val(), isReconnect: true };
+    try {
+      await update(child(target, `players/${player.id}`), { connected: true });
+      const reconnectedSnapshot = await get(target);
+      setupPresence(mode, normalizedRoomId, player.id);
+      return { room: reconnectedSnapshot.val(), isReconnect: true };
+    } catch (error) {
+      throw competitiveJoinError(error, 'post-join-verify', error?.code || 'room/reconnect-failed');
+    }
   }
 
-  const result = await runTransaction(target, (current) => {
-    if (!current || current.removedPlayers?.[player.id]) return current;
-    const players = current.players || {};
-    if (players[player.id]) {
-      return { ...current, players: { ...players, [player.id]: { ...players[player.id], connected: true } }, updatedAt: Date.now() };
-    }
-    if (current.status !== 'lobby' || current.phase !== 'lobby' || Object.keys(players).length >= 4) return current;
-    const nextJoinOrder = Object.values(players).reduce((maxOrder, existing) => Math.max(maxOrder, Number(existing.joinOrder) || 0), 0) + 1;
-    const assignedTeam = current.mode === 'team_battle' ? (nextJoinOrder <= 2 ? 'team_a' : 'team_b') : null;
-    const nextPlayer = { ...clone(player), isHost: false, connected: true, joinOrder: nextJoinOrder, teamId: assignedTeam };
-    const nextTeams = current.mode === 'team_battle' ? { team_a: { ...(current.teams?.team_a || { teamId: 'team_a', playerIds: [] }), playerIds: assignedTeam === 'team_a' ? [...(current.teams?.team_a?.playerIds || []), player.id] : [...(current.teams?.team_a?.playerIds || [])] }, team_b: { ...(current.teams?.team_b || { teamId: 'team_b', playerIds: [] }), playerIds: assignedTeam === 'team_b' ? [...(current.teams?.team_b?.playerIds || []), player.id] : [...(current.teams?.team_b?.playerIds || [])] } } : current.teams;
-    return { ...current, players: { ...players, [player.id]: nextPlayer }, ...(nextTeams ? { teams: nextTeams } : {}), updatedAt: Date.now() };
-  });
+  let result;
+  try {
+    result = await runTransaction(target, (current) => {
+      if (!current || current.removedPlayers?.[player.id]) return current;
+      const players = current.players || {};
+      if (players[player.id]) return { ...current, players: { ...players, [player.id]: { ...players[player.id], connected: true } }, updatedAt: Date.now() };
+      if (current.status !== 'lobby' || current.phase !== 'lobby' || Object.keys(players).length >= 4) return current;
+      const nextJoinOrder = Object.values(players).reduce((maxOrder, existing) => Math.max(maxOrder, Number(existing.joinOrder) || 0), 0) + 1;
+      const assignedTeam = current.mode === 'team_battle' ? (nextJoinOrder <= 2 ? 'team_a' : 'team_b') : null;
+      const nextPlayer = { ...clone(player), isHost: false, connected: true, joinOrder: nextJoinOrder, teamId: assignedTeam };
+      const nextTeams = current.mode === 'team_battle' ? { team_a: { ...(current.teams?.team_a || { teamId: 'team_a', playerIds: [] }), playerIds: assignedTeam === 'team_a' ? [...(current.teams?.team_a?.playerIds || []), player.id] : [...(current.teams?.team_a?.playerIds || [])] }, team_b: { ...(current.teams?.team_b || { teamId: 'team_b', playerIds: [] }), playerIds: assignedTeam === 'team_b' ? [...(current.teams?.team_b?.playerIds || []), player.id] : [...(current.teams?.team_b?.playerIds || [])] } } : current.teams;
+      return { ...current, players: { ...players, [player.id]: nextPlayer }, ...(nextTeams ? { teams: nextTeams } : {}), updatedAt: Date.now() };
+    });
+  } catch (error) {
+    throw competitiveJoinError(error, 'join-transaction', error?.code || 'room/join-transaction-failed');
+  }
 
   const finalRoom = result.snapshot.val();
   if (!result.committed || !finalRoom?.players?.[player.id]) {
-    if (!finalRoom) throw new Error('Room not found. Check the code and try again.');
-    if (finalRoom.status !== 'lobby' || finalRoom.phase !== 'lobby') throw new Error('This room has already started. Only returning players can reconnect.');
-    if (Object.keys(finalRoom.players || {}).length >= 4) throw new Error('Room is full. Ask the host to create a new room.');
-    throw new Error('Unable to join room safely. Please retry.');
+    if (!finalRoom) throw policyJoinError('post-join-verify', 'room/not-found', `Room ${normalizedRoomId} was not found on the server. Check the code and try again.`);
+    if (finalRoom.status !== 'lobby' || finalRoom.phase !== 'lobby') throw policyJoinError('post-join-verify', 'room/game-in-progress', 'This room has already started. Only returning players can reconnect.');
+    if (Object.keys(finalRoom.players || {}).length >= 4) throw policyJoinError('post-join-verify', 'room/full', 'Room is full. Ask the host to create a new room.');
+    throw policyJoinError('post-join-verify', 'room/join-not-committed', 'The server did not confirm your join. Please retry.');
   }
 
   setupPresence(mode, normalizedRoomId, player.id);
