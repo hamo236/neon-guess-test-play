@@ -166,13 +166,17 @@ export async function reconnectOrJoinFirebaseRoom({ code, player, onDiagnostic }
 
   const initialPlayers = initialRoom.players || {};
   if (initialRoom.removedPlayers?.[player.id]) {
-    throw new Error('You were removed from this room.');
+    const error = new Error('You were removed from this room.');
+    error.code = 'room/player-removed';
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'room-policy', error }));
   }
 
   const existingPlayer = initialPlayers[player.id];
   const isReconnect = Boolean(existingPlayer);
   if (!isReconnect && initialRoom.phase !== 'lobby' && initialRoom.phase !== 'results') {
-    throw new Error('Game already in progress. Only returning players can rejoin with this code.');
+    const error = new Error('Game already in progress. Only returning players can rejoin with this code.');
+    error.code = 'room/game-in-progress';
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'room-policy', error }));
   }
 
   const newPlayer = {
@@ -236,13 +240,19 @@ export async function reconnectOrJoinFirebaseRoom({ code, player, onDiagnostic }
     const latestPhase = finalRoom?.phase ?? initialRoom.phase;
     const latestCount = Object.keys(finalRoom?.players || {}).length;
     if (latestPhase !== 'lobby' && latestPhase !== 'results') {
-      throw new Error('Game already in progress. Only returning players can rejoin with this code.');
+      const error = new Error('Game already in progress. Only returning players can rejoin with this code.');
+      error.code = 'room/game-in-progress';
+      throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'join-policy', error }));
     }
     const maxForRoom = finalRoom?.mode === '1v1' || initialRoom.mode === '1v1' ? 2 : MAX_PLAYERS;
     if (latestCount >= maxForRoom) {
-      throw new Error('Room is full.');
+      const error = new Error('Room is full.');
+      error.code = 'room/full';
+      throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'join-policy', error }));
     }
-    throw new Error('Unable to join room safely. Please retry.');
+    const error = new Error('Unable to join room safely. Please retry.');
+    error.code = 'room/join-not-committed';
+    throw addJoinDiagnosticError(error, createJoinDiagnostic({ stage: 'join-transaction', error }));
   }
 
   onDiagnostic?.(createJoinDiagnostic({ stage: 'post-join-verify', status: 'passed', detail: 'The player is present in authoritative room state.' }));
